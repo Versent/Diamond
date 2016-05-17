@@ -77,7 +77,30 @@ class cloudwatchHandler(Handler):
             self.log.error('CloudWatch: Failed to load instance metadata')
             return
         self.instance_id = instances['instance-id']
+        self.autoscaling_group_name = None
+
         self.log.debug("Setting InstanceId: " + self.instance_id)
+
+        self.log.debug(
+            "CloudWatch: Attempting to connect to EC2 at Region: %s",
+            self.region)
+        try:
+
+            conn = boto.ec2.connect_to_region(self.region)
+
+            self.log.debug(
+                "CloudWatch: Succesfully Connected to EC2 at Region: %s",
+                self.region)
+
+            reservations = conn.get_all_instances(instance_ids=[self.instance_id])
+
+            self.tags = reservations[0].instances[0].tags
+
+            if 'aws:autoscaling:groupName' in self.tags:
+                self.autoscaling_group_name = self.tags['aws:autoscaling:groupName']
+
+        except boto.exception.EC2ResponseError:
+            self.log.error('CloudWatch: CloudWatch Exception Handler: ')
 
         self.valid_config = ('region', 'collector', 'metric', 'namespace',
                              'name', 'unit')
@@ -159,6 +182,16 @@ class cloudwatchHandler(Handler):
         except AttributeError:
             pass
 
+    def dimensions(self):
+        """
+        Conditionally return dimensions for the cloudwatch service
+        """
+
+        if not self.autoscaling_group_name:
+            return {'InstanceId': self.instance_id}
+
+        return {'AutoScalingGroupName': self.autoscaling_group_name}
+
     def process(self, metric):
         """
           Process a metric and send it to CloudWatch
@@ -168,7 +201,8 @@ class cloudwatchHandler(Handler):
 
         collector = str(metric.getCollectorPath())
         metricname = str(metric.getMetricPath())
-        timestamp = datetime.datetime.fromtimestamp(metric.timestamp)
+        timestamp = datetime.datetime.fromtimestamp(metric.timestamp).utcnow()
+        dimensions = self.dimensions()
 
         # Send the data as ......
 
@@ -198,7 +232,7 @@ class cloudwatchHandler(Handler):
                         str(rule['name']),
                         str(metric.value),
                         timestamp, str(rule['unit']),
-                        {'InstanceId': self.instance_id})
+                        dimensions)
                     self.log.debug(
                         "CloudWatch: Successfully published metric: %s to"
                         " %s with value (%s)",
